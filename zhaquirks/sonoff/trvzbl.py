@@ -1,4 +1,4 @@
-﻿"""Sonoff TRVZBL - Zigbee Thermostatic Radiator Valve."""
+"""Sonoff TRVZBL - Zigbee Thermostatic Radiator Valve."""
 
 import asyncio
 from datetime import datetime
@@ -10,6 +10,7 @@ from typing import Any
 from zigpy.quirks import CustomCluster
 from zigpy.quirks.v2 import NumberDeviceClass, QuirkBuilder
 from zigpy.quirks.v2.homeassistant import EntityType, UnitOfTemperature, UnitOfTime
+
 try:
     from zha.application.platforms.number import NumberMode
 except ImportError:
@@ -17,6 +18,8 @@ except ImportError:
     from zha.application.platforms.number.device_class import NumberMode
 import zigpy.types as t
 from zigpy.zcl import foundation
+from zigpy.zcl.clusters.general import Basic
+from zigpy.zcl.clusters.hvac import Thermostat
 from zigpy.zcl.foundation import (
     BaseAttributeDefs,
     BaseCommandDefs,
@@ -25,9 +28,6 @@ from zigpy.zcl.foundation import (
     ZCLAttributeDef,
     ZCLCommandDef,
 )
-from zigpy.zcl.clusters.general import Basic
-from zigpy.zcl.clusters.hvac import Thermostat
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -92,9 +92,7 @@ class Uint8ArrayPayload(bytes):
         if len(data) < 3:
             raise ValueError("Data is too short to contain a uint8 array payload")
         if data[0] != int(DataTypeId.uint8):
-            raise ValueError(
-                f"Expected uint8 array element type, got 0x{data[0]:02X}"
-            )
+            raise ValueError(f"Expected uint8 array element type, got 0x{data[0]:02X}")
 
         payload_len = int.from_bytes(data[1:3], "little")
         end = 3 + payload_len
@@ -139,7 +137,9 @@ def _sonoff_trvzbl_decode_panel_linkage(
             bind_state = raw[offset]
             if bind_state > 0x03:
                 return None, None
-            target_x100 = int.from_bytes(raw[offset + 1 : offset + 3], "little", signed=True)
+            target_x100 = int.from_bytes(
+                raw[offset + 1 : offset + 3], "little", signed=True
+            )
             return bind_state != 0x00, (
                 target_x100 if bind_state in (0x01, 0x03) else None
             )
@@ -443,6 +443,7 @@ def _sonoff_trvzbl_today_schedule_day():
         datetime.now().isoweekday(), int(SonoffScheduleDay.Sunday)
     )
 
+
 # 0xF001-0xF017 are quirk-local virtual attributes absent from the device protocol.
 SONOFF_TRVZBL_SCHEDULE_ATTR_BY_DAY = {
     0x01: 0xF001,
@@ -563,7 +564,9 @@ class SonoffScheduleGroupCommand:
             return payload
 
         if self.read_or_write != 0x01:
-            raise ValueError(f"Unsupported schedule read_or_write: {self.read_or_write}")
+            raise ValueError(
+                f"Unsupported schedule read_or_write: {self.read_or_write}"
+            )
 
         # Writes require count/day/mode; fail early rather than send a malformed packet.
         transition_count = self._required("transition_count", self.transition_count)
@@ -952,7 +955,9 @@ def parse_sonoff_trvzbl_schedule_group(value):
         "active_num": active_num,
         "transition_count": transition_count,
         "day_of_week": day_of_week,
-        "day_name": ", ".join(day_names) if day_names else f"unknown_0x{day_of_week:02x}",
+        "day_name": ", ".join(day_names)
+        if day_names
+        else f"unknown_0x{day_of_week:02x}",
         "mode": mode,
         "schedule": schedule,
         "editor_transitions": editor_transitions,
@@ -1078,9 +1083,7 @@ def _sonoff_trvzbl_build_editor_payload(cluster):
     """Build a schedule write payload from the local HA editor entities."""
 
     active_num = _sonoff_trvzbl_uint8(
-        _sonoff_trvzbl_get_attr(
-            cluster, SONOFF_TRVZBL_SCHEDULE_EDITOR_GROUP_ATTR
-        ),
+        _sonoff_trvzbl_get_attr(cluster, SONOFF_TRVZBL_SCHEDULE_EDITOR_GROUP_ATTR),
         "schedule_group",
     )
     day_of_week = _sonoff_trvzbl_uint8(
@@ -1113,9 +1116,7 @@ def _sonoff_trvzbl_build_editor_payload(cluster):
             f"schedule_period_{index}_temperature",
         )
         if heat_setpoint < 500 or heat_setpoint > 3000:
-            raise ValueError(
-                f"schedule_period_{index}_temperature must be 5.0-30.0 C"
-            )
+            raise ValueError(f"schedule_period_{index}_temperature must be 5.0-30.0 C")
 
         transitions.append((transition_time, heat_setpoint))
         previous_time = transition_time
@@ -1126,9 +1127,7 @@ def _sonoff_trvzbl_build_editor_payload(cluster):
     if transitions[0][0] != 0:
         raise ValueError("the first schedule period must start at 00:00")
 
-    payload = bytes(
-        (0x01, 0x01, active_num, len(transitions), day_of_week, 0x01)
-    )
+    payload = bytes((0x01, 0x01, active_num, len(transitions), day_of_week, 0x01))
     for transition_time, heat_setpoint in transitions:
         payload += transition_time.to_bytes(2, "little")
         payload += heat_setpoint.to_bytes(2, "little", signed=True)
@@ -1144,15 +1143,11 @@ def _sonoff_trvzbl_update_editor_from_schedule(cluster, schedule):
         return
 
     selected_day = _sonoff_trvzbl_uint8(
-        _sonoff_trvzbl_get_attr(
-            cluster, SONOFF_TRVZBL_SCHEDULE_EDITOR_DAY_ATTR
-        ),
+        _sonoff_trvzbl_get_attr(cluster, SONOFF_TRVZBL_SCHEDULE_EDITOR_DAY_ATTR),
         "schedule_editor_day",
     )
     selected_group = _sonoff_trvzbl_uint8(
-        _sonoff_trvzbl_get_attr(
-            cluster, SONOFF_TRVZBL_SCHEDULE_EDITOR_GROUP_ATTR
-        ),
+        _sonoff_trvzbl_get_attr(cluster, SONOFF_TRVZBL_SCHEDULE_EDITOR_GROUP_ATTR),
         "schedule_editor_group",
     )
     if (
@@ -1197,9 +1192,7 @@ def _sonoff_trvzbl_update_editor_from_schedule(cluster, schedule):
         )
         cluster._update_attribute(
             SONOFF_TRVZBL_SCHEDULE_EDITOR_PERIOD_TEMP_ATTRS[index],
-            _sonoff_trvzbl_int16(
-                heat_setpoint, f"schedule_period_{index}_temperature"
-            ),
+            _sonoff_trvzbl_int16(heat_setpoint, f"schedule_period_{index}_temperature"),
         )
 
     for index in range(
@@ -1211,9 +1204,7 @@ def _sonoff_trvzbl_update_editor_from_schedule(cluster, schedule):
         )
         cluster._update_attribute(
             SONOFF_TRVZBL_SCHEDULE_EDITOR_PERIOD_TEMP_ATTRS[index],
-            _sonoff_trvzbl_int16(
-                500, f"schedule_period_{index}_temperature"
-            ),
+            _sonoff_trvzbl_int16(500, f"schedule_period_{index}_temperature"),
         )
 
     cluster._update_attribute(
@@ -1335,6 +1326,7 @@ class SonoffThermostat(CustomCluster, Thermostat):
             mandatory=Thermostat.AttributeDefs.max_heat_setpoint_limit.mandatory,
             manufacturer_code=Thermostat.AttributeDefs.max_heat_setpoint_limit.manufacturer_code,
         )
+
     def _is_boost_mode_active(self):
         """Return whether the paired private cluster currently reports Boost."""
 
@@ -1377,7 +1369,6 @@ class SonoffThermostat(CustomCluster, Thermostat):
         )
         self._update_attribute(setpoint_attr.id, setpoint)
         return setpoint
-
 
     async def write_attributes(self, attributes, manufacturer=None, **kwargs):
         """Block HA target-temperature writes while device is in Boost mode."""
@@ -1517,7 +1508,9 @@ class CustomSonoffCluster(CustomCluster):
                 LOGGER.warning("TRV-ZBL pre-temporary state read failed: %s", exc)
                 success = {}
             if setpoint is None:
-                setpoint = success.get(setpoint_attr.name, success.get(setpoint_attr.id))
+                setpoint = success.get(
+                    setpoint_attr.name, success.get(setpoint_attr.id)
+                )
             if system_mode is None:
                 system_mode = success.get(
                     system_mode_attr.name, success.get(system_mode_attr.id)
@@ -2120,9 +2113,7 @@ class CustomSonoffCluster(CustomCluster):
         """Read the schedule group selected in the local editor."""
 
         active_num = _sonoff_trvzbl_uint8(
-            _sonoff_trvzbl_get_attr(
-                self, SONOFF_TRVZBL_SCHEDULE_EDITOR_GROUP_ATTR
-            ),
+            _sonoff_trvzbl_get_attr(self, SONOFF_TRVZBL_SCHEDULE_EDITOR_GROUP_ATTR),
             "schedule_group",
         )
         selected_day = _sonoff_trvzbl_uint8(
@@ -2175,11 +2166,12 @@ class CustomSonoffCluster(CustomCluster):
             "timer_mode_target_temperature",
         )
 
-
         if duration_seconds < 0:
             raise ValueError("temporary_mode_duration must not be negative")
         if duration_seconds % 60 != 0:
-            raise ValueError("temporary_mode_duration must be a whole number of minutes")
+            raise ValueError(
+                "temporary_mode_duration must be a whole number of minutes"
+            )
 
         await self._sonoff_trvzbl_capture_pre_temporary_state()
 
@@ -2291,9 +2283,7 @@ class CustomSonoffCluster(CustomCluster):
             self.AttributeDefs.temporary_mode.id, SonoffTemporaryMode.None_
         )
         self._update_attribute(self.AttributeDefs.temporary_mode_duration.id, 0)
-        self._update_attribute(
-            SONOFF_TRVZBL_TEMPORARY_MODE_EDITOR_DURATION_ATTR, 0
-        )
+        self._update_attribute(SONOFF_TRVZBL_TEMPORARY_MODE_EDITOR_DURATION_ATTR, 0)
         self._update_attribute(
             SONOFF_TRVZBL_TEMPORARY_MODE_EDITOR_APPLY_STATUS_ATTR, "exit sent"
         )
@@ -2313,9 +2303,7 @@ class CustomSonoffCluster(CustomCluster):
     ):
         """Write and mirror one acknowledged 0x601E panel linkage state."""
 
-        payload = _sonoff_trvzbl_encode_panel_linkage(
-            int(bind_state), int(target_x100)
-        )
+        payload = _sonoff_trvzbl_encode_panel_linkage(int(bind_state), int(target_x100))
         result = await super().write_attributes(
             {self.AttributeDefs.remote_attribute_linkage.name: payload},
             manufacturer=manufacturer,
@@ -2368,7 +2356,6 @@ class CustomSonoffCluster(CustomCluster):
         )
         return result
 
-
     async def read_attributes(
         self, attributes, allow_cache=False, only_cache=False, manufacturer=None
     ):
@@ -2392,9 +2379,7 @@ class CustomSonoffCluster(CustomCluster):
             *SONOFF_TRVZBL_SCHEDULE_EDITOR_PERIOD_TIME_ATTRS.values(),
             *SONOFF_TRVZBL_SCHEDULE_EDITOR_PERIOD_TEMP_ATTRS.values(),
         }
-        local_temperature_offset_name = (
-            self.AttributeDefs.local_temperature_offset.name
-        )
+        local_temperature_offset_name = self.AttributeDefs.local_temperature_offset.name
 
         success = {}
         remaining = []
@@ -2407,7 +2392,8 @@ class CustomSonoffCluster(CustomCluster):
             if attrid in local_attr_ids:
                 default = (
                     False
-                    if attrid in (
+                    if attrid
+                    in (
                         SONOFF_TRVZBL_PANEL_LINKAGE_ENABLED_ATTR,
                         SONOFF_TRVZBL_EXTERNAL_TEMPERATURE_SENSOR_ATTR,
                     )
@@ -2464,9 +2450,7 @@ class CustomSonoffCluster(CustomCluster):
 
         return success, failure
 
-    async def write_attributes(
-        self, attributes, manufacturer=None, **kwargs
-    ):
+    async def write_attributes(self, attributes, manufacturer=None, **kwargs):
         """Handle local virtual attributes before forwarding real writes."""
 
         schedule_editor_attr_ids = {
@@ -2517,9 +2501,7 @@ class CustomSonoffCluster(CustomCluster):
         }
         temporary_mode_attr_name = self.AttributeDefs.temporary_mode.name
         temporary_mode_attr_id = self.AttributeDefs.temporary_mode.id
-        temporary_duration_attr_name = (
-            self.AttributeDefs.temporary_mode_duration.name
-        )
+        temporary_duration_attr_name = self.AttributeDefs.temporary_mode_duration.name
         temporary_duration_attr_id = self.AttributeDefs.temporary_mode_duration.id
         local_temperature_offset_attr_name = (
             self.AttributeDefs.local_temperature_offset.name
@@ -2527,9 +2509,7 @@ class CustomSonoffCluster(CustomCluster):
         local_temperature_offset_attr_id = (
             self.AttributeDefs.local_temperature_offset.id
         )
-        panel_linkage_enabled_attr_name = (
-            self.AttributeDefs.panel_linkage_enabled.name
-        )
+        panel_linkage_enabled_attr_name = self.AttributeDefs.panel_linkage_enabled.name
         panel_linkage_enabled_attr_id = self.AttributeDefs.panel_linkage_enabled.id
         panel_linkage_target_attr_name = (
             self.AttributeDefs.panel_linkage_target_temperature.name
@@ -2685,7 +2665,10 @@ class CustomSonoffCluster(CustomCluster):
                     remote_temperature_input_attr_id, remote_temperature_x100
                 )
 
-        for key in (local_temperature_offset_attr_name, local_temperature_offset_attr_id):
+        for key in (
+            local_temperature_offset_attr_name,
+            local_temperature_offset_attr_id,
+        ):
             if key in remaining_attributes:
                 value = remaining_attributes.pop(key)
                 if thermostat_cluster is None:
@@ -2841,9 +2824,8 @@ class CustomSonoffCluster(CustomCluster):
             write_result = await super().write_attributes(
                 remaining_attributes, manufacturer=manufacturer, **kwargs
             )
-            if (
-                raw_linkage_value is not None
-                and _sonoff_trvzbl_write_succeeded(write_result)
+            if raw_linkage_value is not None and _sonoff_trvzbl_write_succeeded(
+                write_result
             ):
                 # Blueprints write 0x601E directly, so mirror their acknowledged state too.
                 self._update_attribute(
@@ -2868,15 +2850,16 @@ class CustomSonoffCluster(CustomCluster):
             schedule = parse_sonoff_trvzbl_schedule_group(args)
             if schedule is None:
                 # Do not let unparseable private responses overwrite valid entity state.
-                LOGGER.debug("TRV-ZBL schedule group response: unable to decode %r", args)
+                LOGGER.debug(
+                    "TRV-ZBL schedule group response: unable to decode %r", args
+                )
             elif schedule["response_type"] == "write":
                 # Write responses update only the latest write status: success/fail.
                 self._update_attribute(
                     SONOFF_TRVZBL_SCHEDULE_STATUS_ATTR, schedule["status_name"]
                 )
                 LOGGER.info(
-                    "TRV-ZBL schedule group write response: active=%s status=%s "
-                    "raw=%s",
+                    "TRV-ZBL schedule group write response: active=%s status=%s raw=%s",
                     schedule["active_num"],
                     schedule["status_name"],
                     schedule["raw"],
@@ -2905,6 +2888,7 @@ class CustomSonoffCluster(CustomCluster):
 
         return super().handle_cluster_request(hdr, args, *super_args, **kwargs)
 
+
 SONOFF_TRVZBL_QUIRK_BUILDER = (
     # Match SONOFF/TRV-ZBL manufacturer/model devices in ZHA
     # and apply the following cluster replacements and entity definitions.
@@ -2912,9 +2896,7 @@ SONOFF_TRVZBL_QUIRK_BUILDER = (
     .replaces(SonoffBasicCluster)
     .replaces(SonoffThermostat)
     .replaces(CustomSonoffCluster)
-    .prevent_default_entity_creation(
-        function=_sonoff_trvzbl_is_replaced_default_entity
-    )
+    .prevent_default_entity_creation(function=_sonoff_trvzbl_is_replaced_default_entity)
     # Standard Thermostat/Basic clusters provide system mode and firmware diagnostics;
     # private cluster 0xFC11 provides advanced TRV-ZBL settings.
     # Expose common settings first, using enum/switch/number entities for stable state.
@@ -3176,38 +3158,33 @@ SONOFF_TRVZBL_QUIRK_BUILDER = (
 )
 
 for _index in range(1, SONOFF_TRVZBL_SCHEDULE_EDITOR_MAX_PERIODS + 1):
-    SONOFF_TRVZBL_QUIRK_BUILDER = (
-        SONOFF_TRVZBL_QUIRK_BUILDER
-        .enum(
-            getattr(
-                CustomSonoffCluster.AttributeDefs,
-                f"schedule_period_{_index}_time",
-            ).name,
-            SonoffScheduleTime,
-            CustomSonoffCluster.cluster_id,
-            translation_key=f"schedule_period_{_index}_time",
-            fallback_name=f"Schedule period {_index} start time",
-        )
-        .number(
-            getattr(
-                CustomSonoffCluster.AttributeDefs,
-                f"schedule_period_{_index}_temperature",
-            ).name,
-            CustomSonoffCluster.cluster_id,
-            min_value=5.0,
-            max_value=30.0,
-            step=0.5,
-            device_class=NumberDeviceClass.TEMPERATURE,
-            unit=UnitOfTemperature.CELSIUS,
-            multiplier=0.01,
-            translation_key=f"schedule_period_{_index}_temperature",
-            fallback_name=f"Schedule period {_index} temperature",
-        )
+    SONOFF_TRVZBL_QUIRK_BUILDER = SONOFF_TRVZBL_QUIRK_BUILDER.enum(
+        getattr(
+            CustomSonoffCluster.AttributeDefs,
+            f"schedule_period_{_index}_time",
+        ).name,
+        SonoffScheduleTime,
+        CustomSonoffCluster.cluster_id,
+        translation_key=f"schedule_period_{_index}_time",
+        fallback_name=f"Schedule period {_index} start time",
+    ).number(
+        getattr(
+            CustomSonoffCluster.AttributeDefs,
+            f"schedule_period_{_index}_temperature",
+        ).name,
+        CustomSonoffCluster.cluster_id,
+        min_value=5.0,
+        max_value=30.0,
+        step=0.5,
+        device_class=NumberDeviceClass.TEMPERATURE,
+        unit=UnitOfTemperature.CELSIUS,
+        multiplier=0.01,
+        translation_key=f"schedule_period_{_index}_temperature",
+        fallback_name=f"Schedule period {_index} temperature",
     )
 
 (
-    SONOFF_TRVZBL_QUIRK_BUILDER
-    .write_attr_button(
+    SONOFF_TRVZBL_QUIRK_BUILDER.write_attr_button(
         attribute_name=CustomSonoffCluster.AttributeDefs.motor_travel_calibration.name,
         cluster_id=CustomSonoffCluster.cluster_id,
         attribute_value=0x01,
