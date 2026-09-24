@@ -527,6 +527,7 @@ class SonoffScheduleGroupCommand:
         mode=None,
         **kwargs,
     ):
+        """Normalize command fields while preserving optional read/write arguments."""
         # zigpy passes HA command_kwargs according to the command schema;
         # convert values to int so numeric strings from the UI or services can be serialized.
         self.schedule_type = int(schedule_type)
@@ -601,6 +602,7 @@ class SonoffScheduleGroupCommand:
         return payload
 
     def __repr__(self):
+        """Describe the header and supplied transitions for protocol diagnostics."""
         fields = [
             f"schedule_type={self.schedule_type}",
             f"read_or_write={self.read_or_write}",
@@ -1300,6 +1302,8 @@ class SonoffThermostat(CustomCluster, Thermostat):
     """Thermostat cluster with TRV-ZBL system modes."""
 
     class AttributeDefs(Thermostat.AttributeDefs):
+        """Device system modes and read-only thermostat limits."""
+
         # Keep the standard Thermostat.system_mode attribute ID and replace only its enum type.
         # This lets HA climate display/write the off/auto/heat modes supported by TRV-ZBL.
         system_mode = ZCLAttributeDef(
@@ -1398,6 +1402,7 @@ class CustomSonoffCluster(CustomCluster):
     cluster_id = SONOFF_TRVZBL_PRIVATE_CLUSTER_ID
 
     def __init__(self, *args, **kwargs):
+        """Initialize local editor state and schedule bounded device-state reads."""
         super().__init__(*args, **kwargs)
         for attrid, value in SONOFF_TRVZBL_SCHEDULE_EDITOR_DEFAULTS.items():
             self._update_attribute(attrid, value)
@@ -2450,65 +2455,11 @@ class CustomSonoffCluster(CustomCluster):
 
         return success, failure
 
-    async def write_attributes(self, attributes, manufacturer=None, **kwargs):
-        """Handle local virtual attributes before forwarding real writes."""
+    async def _write_linkage_attributes(
+        self, remaining_attributes, manufacturer=None, **kwargs
+    ):
+        """Consume linkage inputs and return acknowledged device-write responses."""
 
-        schedule_editor_attr_ids = {
-            SONOFF_TRVZBL_SCHEDULE_EDITOR_GROUP_ATTR,
-            SONOFF_TRVZBL_SCHEDULE_EDITOR_DAY_ATTR,
-            SONOFF_TRVZBL_SCHEDULE_EDITOR_PERIOD_COUNT_ATTR,
-            *SONOFF_TRVZBL_SCHEDULE_EDITOR_PERIOD_TIME_ATTRS.values(),
-            *SONOFF_TRVZBL_SCHEDULE_EDITOR_PERIOD_TEMP_ATTRS.values(),
-        }
-        schedule_editor_attr_names = {
-            self.AttributeDefs.schedule_editor_group.name,
-            self.AttributeDefs.schedule_editor_day.name,
-            self.AttributeDefs.schedule_editor_period_count.name,
-            self.AttributeDefs.schedule_period_1_time.name,
-            self.AttributeDefs.schedule_period_2_time.name,
-            self.AttributeDefs.schedule_period_3_time.name,
-            self.AttributeDefs.schedule_period_4_time.name,
-            self.AttributeDefs.schedule_period_5_time.name,
-            self.AttributeDefs.schedule_period_6_time.name,
-            self.AttributeDefs.schedule_period_7_time.name,
-            self.AttributeDefs.schedule_period_8_time.name,
-            self.AttributeDefs.schedule_period_9_time.name,
-            self.AttributeDefs.schedule_period_10_time.name,
-            self.AttributeDefs.schedule_period_11_time.name,
-            self.AttributeDefs.schedule_period_12_time.name,
-            self.AttributeDefs.schedule_period_1_temperature.name,
-            self.AttributeDefs.schedule_period_2_temperature.name,
-            self.AttributeDefs.schedule_period_3_temperature.name,
-            self.AttributeDefs.schedule_period_4_temperature.name,
-            self.AttributeDefs.schedule_period_5_temperature.name,
-            self.AttributeDefs.schedule_period_6_temperature.name,
-            self.AttributeDefs.schedule_period_7_temperature.name,
-            self.AttributeDefs.schedule_period_8_temperature.name,
-            self.AttributeDefs.schedule_period_9_temperature.name,
-            self.AttributeDefs.schedule_period_10_temperature.name,
-            self.AttributeDefs.schedule_period_11_temperature.name,
-            self.AttributeDefs.schedule_period_12_temperature.name,
-        }
-        temporary_mode_editor_attr_ids = {
-            SONOFF_TRVZBL_TEMPORARY_MODE_EDITOR_MODE_ATTR,
-            SONOFF_TRVZBL_TEMPORARY_MODE_EDITOR_DURATION_ATTR,
-            SONOFF_TRVZBL_TEMPORARY_MODE_EDITOR_TARGET_TEMPERATURE_ATTR,
-        }
-        temporary_mode_editor_attr_names = {
-            self.AttributeDefs.temporary_mode_editor_mode.name,
-            self.AttributeDefs.temporary_mode_editor_duration.name,
-            self.AttributeDefs.temporary_mode_editor_target_temperature.name,
-        }
-        temporary_mode_attr_name = self.AttributeDefs.temporary_mode.name
-        temporary_mode_attr_id = self.AttributeDefs.temporary_mode.id
-        temporary_duration_attr_name = self.AttributeDefs.temporary_mode_duration.name
-        temporary_duration_attr_id = self.AttributeDefs.temporary_mode_duration.id
-        local_temperature_offset_attr_name = (
-            self.AttributeDefs.local_temperature_offset.name
-        )
-        local_temperature_offset_attr_id = (
-            self.AttributeDefs.local_temperature_offset.id
-        )
         panel_linkage_enabled_attr_name = self.AttributeDefs.panel_linkage_enabled.name
         panel_linkage_enabled_attr_id = self.AttributeDefs.panel_linkage_enabled.id
         panel_linkage_target_attr_name = (
@@ -2530,41 +2481,7 @@ class CustomSonoffCluster(CustomCluster):
             self.AttributeDefs.external_temperature_sensor.id
         )
 
-        remaining_attributes = dict(attributes)
         linkage_results = []
-
-        # Selecting an option switches the active device group; keep editor state until success is confirmed.
-        for key in (
-            self.AttributeDefs.schedule_editor_group.name,
-            SONOFF_TRVZBL_SCHEDULE_EDITOR_GROUP_ATTR,
-        ):
-            if key not in remaining_attributes:
-                continue
-            active_num = _sonoff_trvzbl_uint8(
-                remaining_attributes.pop(key), "schedule_group"
-            )
-            if active_num not in SONOFF_TRVZBL_SCHEDULE_GROUP_VALUES:
-                raise ValueError("schedule_group must be 0, 1 or 2")
-            active_attr = self.AttributeDefs.weekly_schedule_active_num
-            result = await super().write_attributes(
-                {active_attr.name: active_num},
-                manufacturer=manufacturer,
-                **kwargs,
-            )
-            if not _sonoff_trvzbl_write_succeeded(result):
-                LOGGER.warning(
-                    "TRV-ZBL schedule group activation failed: active=%s", active_num
-                )
-                return result
-            linkage_results.extend(result)
-            self._update_attribute(active_attr.id, active_num)
-            self._update_attribute(SONOFF_TRVZBL_SCHEDULE_EDITOR_GROUP_ATTR, active_num)
-            _sonoff_trvzbl_load_cached_schedule(self)
-            LOGGER.info("TRV-ZBL schedule group activated: active=%s", active_num)
-
-        thermostat_cluster = getattr(self.endpoint, "in_clusters", {}).get(
-            SonoffThermostat.cluster_id
-        )
 
         written_panel_target = None
         for key in (panel_linkage_target_attr_name, panel_linkage_target_attr_id):
@@ -2665,24 +2582,57 @@ class CustomSonoffCluster(CustomCluster):
                     remote_temperature_input_attr_id, remote_temperature_x100
                 )
 
-        for key in (
-            local_temperature_offset_attr_name,
-            local_temperature_offset_attr_id,
-        ):
-            if key in remaining_attributes:
-                value = remaining_attributes.pop(key)
-                if thermostat_cluster is None:
-                    raise ValueError("thermostat cluster is not available")
-                await thermostat_cluster.write_attributes(
-                    {
-                        SonoffThermostat.AttributeDefs.local_temperature_calibration.name: value
-                    },
-                    manufacturer=manufacturer,
-                    **kwargs,
-                )
-                self._update_attribute(local_temperature_offset_attr_id, value)
-                break
+        return linkage_results
 
+    def _write_editor_attributes(self, remaining_attributes):
+        """Consume local editor changes, rolling back invalid schedule times."""
+
+        schedule_editor_attr_ids = {
+            SONOFF_TRVZBL_SCHEDULE_EDITOR_GROUP_ATTR,
+            SONOFF_TRVZBL_SCHEDULE_EDITOR_DAY_ATTR,
+            SONOFF_TRVZBL_SCHEDULE_EDITOR_PERIOD_COUNT_ATTR,
+            *SONOFF_TRVZBL_SCHEDULE_EDITOR_PERIOD_TIME_ATTRS.values(),
+            *SONOFF_TRVZBL_SCHEDULE_EDITOR_PERIOD_TEMP_ATTRS.values(),
+        }
+        schedule_editor_attr_names = {
+            self.AttributeDefs.schedule_editor_group.name,
+            self.AttributeDefs.schedule_editor_day.name,
+            self.AttributeDefs.schedule_editor_period_count.name,
+            self.AttributeDefs.schedule_period_1_time.name,
+            self.AttributeDefs.schedule_period_2_time.name,
+            self.AttributeDefs.schedule_period_3_time.name,
+            self.AttributeDefs.schedule_period_4_time.name,
+            self.AttributeDefs.schedule_period_5_time.name,
+            self.AttributeDefs.schedule_period_6_time.name,
+            self.AttributeDefs.schedule_period_7_time.name,
+            self.AttributeDefs.schedule_period_8_time.name,
+            self.AttributeDefs.schedule_period_9_time.name,
+            self.AttributeDefs.schedule_period_10_time.name,
+            self.AttributeDefs.schedule_period_11_time.name,
+            self.AttributeDefs.schedule_period_12_time.name,
+            self.AttributeDefs.schedule_period_1_temperature.name,
+            self.AttributeDefs.schedule_period_2_temperature.name,
+            self.AttributeDefs.schedule_period_3_temperature.name,
+            self.AttributeDefs.schedule_period_4_temperature.name,
+            self.AttributeDefs.schedule_period_5_temperature.name,
+            self.AttributeDefs.schedule_period_6_temperature.name,
+            self.AttributeDefs.schedule_period_7_temperature.name,
+            self.AttributeDefs.schedule_period_8_temperature.name,
+            self.AttributeDefs.schedule_period_9_temperature.name,
+            self.AttributeDefs.schedule_period_10_temperature.name,
+            self.AttributeDefs.schedule_period_11_temperature.name,
+            self.AttributeDefs.schedule_period_12_temperature.name,
+        }
+        temporary_mode_editor_attr_ids = {
+            SONOFF_TRVZBL_TEMPORARY_MODE_EDITOR_MODE_ATTR,
+            SONOFF_TRVZBL_TEMPORARY_MODE_EDITOR_DURATION_ATTR,
+            SONOFF_TRVZBL_TEMPORARY_MODE_EDITOR_TARGET_TEMPERATURE_ATTR,
+        }
+        temporary_mode_editor_attr_names = {
+            self.AttributeDefs.temporary_mode_editor_mode.name,
+            self.AttributeDefs.temporary_mode_editor_duration.name,
+            self.AttributeDefs.temporary_mode_editor_target_temperature.name,
+        }
         for key in list(remaining_attributes):
             if key in schedule_editor_attr_names:
                 attr = self.find_attribute(key)
@@ -2747,6 +2697,13 @@ class CustomSonoffCluster(CustomCluster):
                 value = remaining_attributes.pop(key)
                 self._update_attribute(key, value)
 
+    def _validate_temporary_attributes(self, remaining_attributes):
+        """Handle the inactive-mode sentinel and validate real duration writes."""
+
+        temporary_mode_attr_name = self.AttributeDefs.temporary_mode.name
+        temporary_mode_attr_id = self.AttributeDefs.temporary_mode.id
+        temporary_duration_attr_name = self.AttributeDefs.temporary_mode_duration.name
+        temporary_duration_attr_id = self.AttributeDefs.temporary_mode_duration.id
         for key in (temporary_mode_attr_name, temporary_mode_attr_id):
             if key in remaining_attributes:
                 value = remaining_attributes[key]
@@ -2811,6 +2768,78 @@ class CustomSonoffCluster(CustomCluster):
                         "while Timer mode is active"
                     )
 
+    async def write_attributes(self, attributes, manufacturer=None, **kwargs):
+        """Handle local virtual attributes before forwarding real writes."""
+
+        remaining_attributes = dict(attributes)
+        linkage_results = []
+
+        # Selecting an option switches the active device group; keep editor state until success is confirmed.
+        for key in (
+            self.AttributeDefs.schedule_editor_group.name,
+            SONOFF_TRVZBL_SCHEDULE_EDITOR_GROUP_ATTR,
+        ):
+            if key not in remaining_attributes:
+                continue
+            active_num = _sonoff_trvzbl_uint8(
+                remaining_attributes.pop(key), "schedule_group"
+            )
+            if active_num not in SONOFF_TRVZBL_SCHEDULE_GROUP_VALUES:
+                raise ValueError("schedule_group must be 0, 1 or 2")
+            active_attr = self.AttributeDefs.weekly_schedule_active_num
+            result = await super().write_attributes(
+                {active_attr.name: active_num},
+                manufacturer=manufacturer,
+                **kwargs,
+            )
+            if not _sonoff_trvzbl_write_succeeded(result):
+                LOGGER.warning(
+                    "TRV-ZBL schedule group activation failed: active=%s", active_num
+                )
+                return result
+            linkage_results.extend(result)
+            self._update_attribute(active_attr.id, active_num)
+            self._update_attribute(SONOFF_TRVZBL_SCHEDULE_EDITOR_GROUP_ATTR, active_num)
+            _sonoff_trvzbl_load_cached_schedule(self)
+            LOGGER.info("TRV-ZBL schedule group activated: active=%s", active_num)
+
+        linkage_results.extend(
+            await self._write_linkage_attributes(
+                remaining_attributes, manufacturer, **kwargs
+            )
+        )
+
+        local_temperature_offset_attr_name = (
+            self.AttributeDefs.local_temperature_offset.name
+        )
+        local_temperature_offset_attr_id = (
+            self.AttributeDefs.local_temperature_offset.id
+        )
+        thermostat_cluster = getattr(self.endpoint, "in_clusters", {}).get(
+            SonoffThermostat.cluster_id
+        )
+
+        for key in (
+            local_temperature_offset_attr_name,
+            local_temperature_offset_attr_id,
+        ):
+            if key in remaining_attributes:
+                value = remaining_attributes.pop(key)
+                if thermostat_cluster is None:
+                    raise ValueError("thermostat cluster is not available")
+                await thermostat_cluster.write_attributes(
+                    {
+                        SonoffThermostat.AttributeDefs.local_temperature_calibration.name: value
+                    },
+                    manufacturer=manufacturer,
+                    **kwargs,
+                )
+                self._update_attribute(local_temperature_offset_attr_id, value)
+                break
+
+        self._write_editor_attributes(remaining_attributes)
+        self._validate_temporary_attributes(remaining_attributes)
+
         if remaining_attributes:
             raw_linkage_value = None
             for key in (
@@ -2849,7 +2878,7 @@ class CustomSonoffCluster(CustomCluster):
             # without a known schema, so parse it in the quirk and update local virtual attributes.
             schedule = parse_sonoff_trvzbl_schedule_group(args)
             if schedule is None:
-                # Do not let unparseable private responses overwrite valid entity state.
+                # Do not let unparsable private responses overwrite valid entity state.
                 LOGGER.debug(
                     "TRV-ZBL schedule group response: unable to decode %r", args
                 )

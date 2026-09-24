@@ -1,6 +1,7 @@
 """Tests for SONOFF TRV-ZBL protocol and custom cluster behavior."""
 
 import asyncio
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -762,3 +763,287 @@ async def test_delayed_read_retries(private_cluster, method_name):
         await getattr(private_cluster, method_name)(delay=0)
     assert reader.await_count == 3
     reader.assert_awaited_with([attribute_name], allow_cache=False)
+
+
+@pytest.mark.parametrize(
+    ("convert", "value", "expected"),
+    [
+        (trv.convert_sonoff_trvzbl_motor_travel_calibration_status, 0, "Normal"),
+        (trv.convert_sonoff_trvzbl_motor_travel_calibration_status, 1, "Failed"),
+        (trv.convert_sonoff_trvzbl_motor_travel_calibration_status, 3, "Unknown 0x03"),
+        (trv.convert_sonoff_trvzbl_motor_travel_calibration_status, None, "Unknown"),
+        (trv.convert_sonoff_trvzbl_device_work_mode, 3, "Manual"),
+        (trv.convert_sonoff_trvzbl_device_work_mode, 4, "Schedule"),
+        (trv.convert_sonoff_trvzbl_device_work_mode, 255, "Unknown 0xFF"),
+        (trv.convert_sonoff_trvzbl_device_work_mode, "bad", "Unknown"),
+    ],
+)
+def test_status_converters(convert, value, expected):
+    """Retain unknown diagnostics instead of mapping them to a valid device state."""
+    assert convert(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value", [None, b"\x00\x01\x01", bytearray(b"\x00\x01\x01"), [0, 1, 1], (0, 1, 1)]
+)
+def test_hvac_payload_normalization(value):
+    """Normalize the report representations accepted from zigpy and service input."""
+    payload = trv.SonoffHvacMessageNotification(value)
+    assert payload.serialize() == (b"" if value is None else b"\x00\x01\x01")
+    assert trv.SonoffHvacMessageNotification.deserialize(payload.serialize()) == (
+        payload,
+        b"",
+    )
+    assert trv.SonoffRawBytes.deserialize(payload.serialize()) == (payload, b"")
+
+
+def test_hvac_decoded_array():
+    """Accept a decoded ZCL array and safely ignore non-iterable notifications."""
+    decoded, _ = foundation.Array.deserialize(bytes.fromhex("20 03 00 00 01 01"))
+    assert trv.SonoffHvacMessageNotification(decoded) == b"\x00\x01\x01"
+    assert trv.SonoffHvacMessageNotification(object()) == b""
+    assert trv.convert_sonoff_trvzbl_open_window_detected(["0", "1", "1"]) == "Detected"
+    assert trv.convert_sonoff_trvzbl_open_window_detected(object()) is None
+
+
+@pytest.mark.parametrize(
+    ("fields", "expected"),
+    [
+        (
+            {
+                "cluster_id": trv.SonoffThermostat.cluster_id,
+                "unique_id_suffix": "local_temperature_calibration",
+            },
+            True,
+        ),
+        ({"attribute_name": "min_heat_setpoint_limit"}, True),
+        ({"fallback_name": "Max heat setpoint limit"}, True),
+        ({"translation_key": "battery"}, False),
+        ({"unique_id_suffix": "identify"}, False),
+        ({}, False),
+    ],
+)
+def test_default_entity_filter(fields, expected):
+    """Hide replaced thermostat settings while retaining native battery and identify entities."""
+    assert (
+        trv._sonoff_trvzbl_is_replaced_default_entity(SimpleNamespace(**fields))
+        is expected
+    )
+
+
+@pytest.mark.parametrize("use_id", [False, True])
+async def test_temperature_offset_proxy(trv_device, private_cluster, use_id):
+    """Calibration reads and writes use the standard thermostat attribute, preserving raw units."""
+    thermostat = trv_device.endpoints[1].thermostat
+    attr = private_cluster.AttributeDefs.local_temperature_offset
+    with mock.patch.object(
+        thermostat, "write_attributes", new_callable=mock.AsyncMock
+    ) as writer:
+        await private_cluster.write_attributes({attr.id if use_id else attr.name: -20})
+    writer.assert_awaited_once_with(
+        {"local_temperature_calibration": -20}, manufacturer=None
+    )
+    with mock.patch.object(
+        thermostat, "read_attributes", new_callable=mock.AsyncMock
+    ) as reader:
+        reader.return_value = ({"local_temperature_calibration": 12}, {})
+        success, failure = await private_cluster.read_attributes(
+            [attr.name], allow_cache=False
+        )
+    reader.assert_awaited_once_with(
+        ["local_temperature_calibration"],
+        allow_cache=False,
+        only_cache=False,
+        manufacturer=None,
+    )
+    assert success == {attr.name: 12}
+    assert failure == {}
+    assert private_cluster.get(attr.id) == 12
+
+
+async def test_temperature_offset_missing_thermostat(trv_device, private_cluster):
+    """Missing thermostat permits cached calibration reads but cannot accept writes or exits."""
+    trv_device.endpoints[1].in_clusters.pop(trv.SonoffThermostat.cluster_id)
+    attr = private_cluster.AttributeDefs.local_temperature_offset
+    private_cluster.update_attribute(attr.id, 10)
+    assert await private_cluster.read_attributes([attr.name]) == ({attr.name: 10}, {})
+    with pytest.raises(ValueError, match="thermostat cluster"):
+        await private_cluster.write_attributes({attr.name: 20})
+    with pytest.raises(ValueError, match="thermostat cluster"):
+        await private_cluster.temporary_mode_exit()
+    await private_cluster._sonoff_trvzbl_capture_pre_temporary_state()
+    assert private_cluster._sonoff_trvzbl_pre_temporary_state is None
+
+
+@pytest.mark.parametrize("use_id", [False, True])
+@pytest.mark.parametrize("day", [0, 128, "invalid"])
+async def test_invalid_editor_day_uses_today(private_cluster, use_id, day):
+    """Invalid day selections fall back to the local weekday and load its cached schedule."""
+    attr = private_cluster.AttributeDefs.schedule_editor_day
+    with mock.patch.object(trv, "_sonoff_trvzbl_today_schedule_day", return_value=2):
+        await private_cluster.write_attributes({attr.id if use_id else attr.name: day})
+        success, failure = await private_cluster.read_attributes([attr.name])
+    assert success == {attr.name: 2}
+    assert failure == {}
+    assert (
+        private_cluster.get(private_cluster.AttributeDefs.schedule_period_1_time.id)
+        == 0
+    )
+
+
+@pytest.mark.parametrize("use_id", [False, True])
+async def test_raw_linkage_write(private_cluster, write_mock, use_id):
+    """Blueprint writes of the real linkage attribute update both virtual mirrors."""
+    attr = private_cluster.AttributeDefs.remote_attribute_linkage
+    payload = trv.Uint8ArrayPayload(bytes.fromhex("01 01 00 02 03 01 34 08"))
+    await private_cluster.write_attributes({attr.id if use_id else attr.name: payload})
+    assert (
+        private_cluster.get(private_cluster.AttributeDefs.panel_linkage_enabled.id)
+        is True
+    )
+    assert (
+        private_cluster.get(
+            private_cluster.AttributeDefs.panel_linkage_target_temperature.id
+        )
+        == 2100
+    )
+    assert write_mock.await_count == 1
+
+
+async def test_linkage_enable_disable_and_sample_update(private_cluster, write_mock):
+    """Enable uses a cached target; disabling emits unbound frames; online samples are forwarded."""
+    defs = private_cluster.AttributeDefs
+    private_cluster.update_attribute(defs.panel_linkage_target_temperature.id, 2100)
+    await private_cluster.write_attributes({defs.panel_linkage_enabled.name: True})
+    await private_cluster.write_attributes({defs.panel_linkage_enabled.name: False})
+    await private_cluster.write_attributes(
+        {defs.external_temperature_sensor.name: False}
+    )
+    private_cluster.update_attribute(defs.external_temperature_sensor.id, True)
+    await private_cluster.write_attributes({defs.external_temperature_input.name: 2200})
+    frames = [
+        call.args[0][0].value.value.serialize() for call in write_mock.call_args_list
+    ]
+    assert frames == [
+        bytes.fromhex(value)
+        for value in (
+            "20 08 00 01 01 00 02 03 01 34 08",
+            "20 08 00 01 01 00 02 03 00 00 00",
+            "20 08 00 01 01 00 01 03 00 00 00",
+            "20 08 00 01 01 00 01 03 01 98 08",
+        )
+    ]
+
+
+async def test_capture_missing_state_and_no_overwrite(trv_device, private_cluster):
+    """Capture uncached thermostat values once and retain them across subsequent applies."""
+    thermostat = trv_device.endpoints[1].thermostat
+    with mock.patch.object(
+        thermostat, "read_attributes", new_callable=mock.AsyncMock
+    ) as reader:
+        reader.return_value = (
+            {
+                "occupied_heating_setpoint": 1800,
+                "system_mode": trv.SonoffSystemMode.Auto,
+            },
+            {},
+        )
+        await private_cluster._sonoff_trvzbl_capture_pre_temporary_state()
+        await private_cluster._sonoff_trvzbl_capture_pre_temporary_state()
+    assert reader.await_count == 1
+    assert private_cluster._sonoff_trvzbl_pre_temporary_state == {
+        "occupied_heating_setpoint": 1800,
+        "system_mode": trv.SonoffSystemMode.Auto,
+    }
+
+
+async def test_capture_read_failure(trv_device, private_cluster):
+    """A failed optional snapshot read does not prevent temporary mode from being configured."""
+    thermostat = trv_device.endpoints[1].thermostat
+    with mock.patch.object(thermostat, "read_attributes", side_effect=TimeoutError()):
+        await private_cluster._sonoff_trvzbl_capture_pre_temporary_state()
+    assert private_cluster._sonoff_trvzbl_pre_temporary_state == {
+        "occupied_heating_setpoint": None,
+        "system_mode": None,
+    }
+
+
+async def test_exit_reads_uncached_setpoint(trv_device, private_cluster):
+    """Exit reads the live setpoint when there is no saved or cached target."""
+    thermostat = trv_device.endpoints[1].thermostat
+    with (
+        mock.patch.object(
+            thermostat, "read_attributes", new_callable=mock.AsyncMock
+        ) as reader,
+        mock.patch.object(
+            thermostat, "write_attributes_raw", new_callable=mock.AsyncMock
+        ) as writer,
+    ):
+        reader.return_value = (
+            {thermostat.AttributeDefs.occupied_heating_setpoint.id: 2050},
+            {},
+        )
+        writer.return_value = [
+            [foundation.WriteAttributesStatusRecord(status=foundation.Status.SUCCESS)]
+        ]
+        await private_cluster.temporary_mode_exit()
+    assert writer.call_args.args[0][0].value.value == 2050
+    reader.assert_awaited_once_with(
+        ["occupied_heating_setpoint"], allow_cache=False, manufacturer=None
+    )
+
+
+async def test_temporary_none_apply_exits(private_cluster):
+    """Applying the None editor option invokes the exit operation without private writes."""
+    await private_cluster.write_attributes(
+        {"temporary_mode_editor_mode": trv.SonoffTemporaryModeEditor.None_}
+    )
+    with mock.patch.object(
+        private_cluster, "temporary_mode_exit", new_callable=mock.AsyncMock
+    ) as exit_mode:
+        await private_cluster.temporary_mode_apply()
+    exit_mode.assert_awaited_once_with(expect_reply=False)
+
+
+async def test_temporary_none_write_is_local(private_cluster, write_mock):
+    """Do not transmit the display-only inactive sentinel rejected by the physical device."""
+    await private_cluster.write_attributes(
+        {"temporary_mode": trv.SonoffTemporaryMode.None_}
+    )
+    assert (
+        private_cluster.get(private_cluster.AttributeDefs.temporary_mode_editor_mode.id)
+        == trv.SonoffTemporaryModeEditor.None_
+    )
+    write_mock.assert_not_awaited()
+
+
+@pytest.mark.parametrize(("slot", "value"), [(1, 30), (1, 65535), (2, 0), (2, 1440)])
+async def test_schedule_apply_invalid_time(private_cluster, slot, value):
+    """Malformed cached editor times cannot be sent even if they bypass the editor write path."""
+    private_cluster.update_attribute(
+        trv.SONOFF_TRVZBL_SCHEDULE_EDITOR_PERIOD_TIME_ATTRS[slot], value
+    )
+    with (
+        mock.patch.object(
+            private_cluster.endpoint, "request", new_callable=mock.AsyncMock
+        ) as transport,
+        pytest.raises(ValueError),
+    ):
+        await private_cluster.schedule_apply()
+    transport.assert_not_awaited()
+
+
+@pytest.mark.parametrize("temperature", [499, 3001, -32769, 32768])
+async def test_schedule_apply_invalid_temperature(private_cluster, temperature):
+    """Reject invalid temperature bounds and signed integer overflow before sending."""
+    private_cluster.update_attribute(
+        trv.SONOFF_TRVZBL_SCHEDULE_EDITOR_PERIOD_TEMP_ATTRS[1], temperature
+    )
+    with (
+        mock.patch.object(
+            private_cluster.endpoint, "request", new_callable=mock.AsyncMock
+        ) as transport,
+        pytest.raises(ValueError),
+    ):
+        await private_cluster.schedule_apply()
+    transport.assert_not_awaited()
