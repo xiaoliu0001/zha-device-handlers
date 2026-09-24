@@ -3114,13 +3114,13 @@ SONOFF_TRVZBL_QUIRK_BUILDER = (
     .number(
         CustomSonoffCluster.AttributeDefs.temperature_control_accuracy.name,
         CustomSonoffCluster.cluster_id,
-        min_value=-1.0,
+        min_value=-2.0,
         max_value=-0.2,
         step=0.2,
         # Older ZHA/zigpy enums lack temperature_delta; keep a plain Celsius number.
         device_class=getattr(NumberDeviceClass, "TEMPERATURE_DELTA", None),
         unit=UnitOfTemperature.CELSIUS,
-        # Temperature deltas also use 0.01 degrees Celsius, with a UI step of 0.1 degrees Celsius.
+        # Temperature deltas use 0.01 degrees Celsius; UI step is 0.2, firmware default is -1.
         multiplier=0.01,
         translation_key="heating_on_offset",
         fallback_name="Heating ON Offset",

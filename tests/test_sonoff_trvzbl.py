@@ -568,6 +568,13 @@ async def test_entity_metadata(trv_device):
     for name in ("occupied_heating_setpoint", "panel_linkage_target_temperature"):
         item = by_suffix[name]
         assert (item.min, item.max, item.multiplier) == (5, 30, 0.01)
+    accuracy = by_suffix["temperature_control_accuracy"]
+    assert (accuracy.min, accuracy.max, accuracy.step, accuracy.multiplier) == (
+        -2.0,
+        -0.2,
+        0.2,
+        0.01,
+    )
     external = by_suffix["external_temperature_input"]
     assert (external.min, external.max, external.multiplier) == (-30, 100, 0.01)
     assert by_suffix["temporary_mode_editor_duration"].multiplier == pytest.approx(
